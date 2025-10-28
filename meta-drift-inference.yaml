@@ -1,0 +1,1297 @@
+chart:
+  name: data-drift
+  version: 1.0.0
+  description: Data drift monitoring
+
+files:
+  - path: Chart.yaml
+    template: true
+    content: |
+      apiVersion: v2
+      name: "{{ .Values.chart.name }}"
+      version: "{{ .Values.chart.version }}"
+      description: "{{ .Values.chart.description }}"
+      type: application
+      files:
+      - src/**
+      app.dognauts:
+        subjectArea: "{{ .Values.subjectArea }}"
+        sourceMetafileRepo: "{{ .Values.sourceMetafileRepo }}"
+        sourceMetafileBranch: "{{ .Values.sourceMetafileBranch }}"
+        sourceMetafileName: "{{ .Values.sourceMetafileName }}"
+      annotations:
+        app.dognauts/platform-generated: true
+        app.dognauts/subjectArea: "{{ .Values.subjectArea }}"
+
+
+  - path: templates/_helpers.tpl
+    template: true
+    content: |
+      {{`{{/*
+      Generate monitorUID for dasboard and drift-monitor
+      */}}`}}
+      {{`{{- define "template.monitorUID" -}}`}}
+      {{`{{- if not (.Values.generatedRandom) -}}`}}
+        {{`{{- $randomValue := randAlphaNum 16 -}}`}}
+        {{`{{- $_ := set .Values "generatedRandom" $randomValue -}}`}}
+      {{`{{- end -}}`}}
+      {{`{{- .Values.generatedRandom -}}`}}
+      {{`{{- end -}}`}}
+
+      {{`{{/*
+      Expand the name of the chart.
+      */}}`}}
+      {{`{{- define "template.name" -}}`}}
+      {{`{{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}`}}
+      {{`{{- end }}`}}
+
+      {{`{{/*
+      Create chart name and version as used by the chart label.
+      */}}`}}
+      {{`{{- define "template.chart" -}}`}}
+      {{`{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}`}}
+      {{`{{- end }}`}}
+
+      {{`{{/*
+      Selector labels
+      */}}`}}
+      {{`{{- define "template.selectorLabels" -}}`}}
+      app.kubernetes.io/name: {{`{{ include "template.name" . }}`}}
+      app.kubernetes.io/instance: {{`{{ .Release.Name }}`}}
+      {{`{{- end }}`}}
+
+      {{`{{/*
+      Common labels
+      */}}`}}
+      {{`{{- define "template.labels" -}}`}}
+      helm.sh/chart: {{`{{ include "template.chart" . }}`}}
+      {{`{{ include "template.selectorLabels" . }}`}}
+      app.kubernetes.io/managed-by: {{`{{ .Release.Service }}`}}
+      app.dognauts/subjectArea: {{`"{{ .Values.subjectArea }}"`}}
+      {{`{{- end }}`}}
+
+      {{`{{/*
+      Istio annotations
+      */}}`}}
+      {{`{{- define "template.istioAnnotations" -}}`}}
+      proxy.istio.io/config: |
+        proxyMetadata:
+          ISTIO_META_DNS_CAPTURE: "false"    
+      traffic.sidecar.istio.io/excludeOutboundPorts: "8200"
+      {{`{{- end }}`}}
+
+
+  - path: templates/EnvoyFilterDashboard.yaml
+    template: true
+    content: |
+      apiVersion: networking.istio.io/v1alpha3
+      kind: EnvoyFilter
+      metadata:
+        name: casbin-dashboard-{{`{{ .Release.Name }}`}}
+      spec:
+        workloadSelector:
+          labels:
+            {{`{{- include "template.selectorLabels" . | nindent 6 }}`}}
+            app: drift-dashboard
+        configPatches:
+          - applyTo: HTTP_FILTER
+            match:
+              context: SIDECAR_INBOUND
+              listener:
+                filterChain:
+                  filter:
+                    name: envoy.filters.network.http_connection_manager
+            patch:
+              operation: INSERT_BEFORE
+              value:
+                name: envoy.filters.http.ext_authz
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                  transport_api_version: V3
+                  grpc_service:
+                    envoy_grpc:
+                      cluster_name: outbound|{{`{{ .Values.envoyFilter.authServer.port }}`}}||{{`{{ .Values.envoyFilter.authServer.url }}`}}.{{`{{ .Values.clusterDomain }}`}}
+                    timeout: 2s
+                    initial_metadata:
+                      - key: x-service-name
+                        value: {{`"{{ .Values.envoyFilter.header.dashboard }}"`}}
+                  failure_mode_allow: false
+                  status_on_error:
+                    code: NetworkAuthenticationRequired
+                  with_request_body:
+                    max_request_bytes: 8192
+                    allow_partial_message: true
+  
+
+  - path: templates/EnvoyFilterDriftMonitor.yaml
+    template: true
+    content: |
+      apiVersion: networking.istio.io/v1alpha3
+      kind: EnvoyFilter
+      metadata:
+        name: casbin-drift-monitor-{{`{{ .Release.Name }}`}}
+      spec:
+        workloadSelector:
+          labels:
+            {{`{{- include "template.selectorLabels" . | nindent 6 }}`}}
+            app: drift-monitor
+        configPatches:
+          - applyTo: HTTP_FILTER
+            match:
+              context: SIDECAR_INBOUND
+              listener:
+                filterChain:
+                  filter:
+                    name: envoy.filters.network.http_connection_manager
+            patch:
+              operation: INSERT_BEFORE
+              value:
+                name: envoy.filters.http.ext_authz
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz
+                  transport_api_version: V3
+                  grpc_service:
+                    envoy_grpc:
+                      cluster_name: outbound|{{`{{ .Values.envoyFilter.authServer.port }}`}}||{{`{{ .Values.envoyFilter.authServer.url }}`}}.{{`{{ .Values.clusterDomain }}`}}
+                    timeout: 2s
+                    initial_metadata:
+                      - key: x-service-name
+                        value: {{`"{{ .Values.envoyFilter.header.driftMonitor }}"`}}
+                  failure_mode_allow: false
+                  status_on_error:
+                    code: NetworkAuthenticationRequired
+                  with_request_body:
+                    max_request_bytes: 8192
+                    allow_partial_message: true
+
+
+  - path: templates/DriftMonitor.yaml
+    template: true
+    content: |
+      apiVersion: dognauts.neoflex.ru/v1alpha1
+      kind: DriftMonitor
+      metadata:
+        name: {{`{{ .Release.Name }}`}}
+        namespace: {{`{{ .Release.Namespace }}`}}
+        labels:
+          {{`{{- include "template.labels" . | nindent 4 }}`}}
+          app: drift-monitor
+      spec:
+        monitorUID: {{`"{{ include "template.monitorUID" . }}"`}}
+        tenantID: {{`"{{ .Values.monitor.tenantID }}"`}}
+        projectID: {{`"{{ .Values.monitor.projectID }}"`}}
+        monitorType: "{{ .Values.spec.monitor.monitorType }}"
+        datasourceName: {{`"{{ .Values.monitor.dataSourceName }}"`}}
+        monitorDescription: {{`"{{ .Values.monitor.monitorDescription }}"`}}
+        primaryTableName: {{`"{{ .Values.monitor.primaryTableName }}"`}}
+        referenceType: {{`"{{ .Values.monitor.referenceType }}"`}}
+        {{`{{- if eq .Values.monitor.referenceType "Baseline Table" }}`}}
+        baselineTableName: {{`"{{ .Values.monitor.baselineTableName }}"`}}
+        {{`{{- end }}`}}
+        problemType: {{`"{{ .Values.monitor.problemType }}"`}}
+        timestampColumnName: {{`"{{ .Values.monitor.timestampColumnName }}"`}}
+        predictionColumnName: {{`"{{ .Values.monitor.predictionColumnName }}"`}}
+        trueLabelColumnName: {{`"{{ .Values.monitor.trueLabelColumnName }}"`}}
+        {{`{{- if .Values.monitor.dropColumnNames }}`}}
+        dropColumnNames:
+          {{`{{- toYaml .Values.monitor.dropColumnNames | nindent 6 }}`}}
+        {{`{{- end }}`}}
+        windows:
+          {{`{{- toYaml .Values.monitor.windows | nindent 6 }}`}}
+        {{`{{- if or .Values.monitor.metrics.regression .Values.monitor.metrics.binaryClassification }}`}}
+        metrics:
+          {{`{{- if .Values.monitor.metrics.regression }}`}}
+          regression:
+            {{`{{- range .Values.monitor.metrics.regression }}`}}
+            - metricID: {{`"{{ .metricID }}"`}}
+              columnThresholds:
+                {{`{{- range .columnThresholds }}`}}
+                - columnNames:
+                    {{`{{- toYaml .columnNames | nindent 16 }}`}}
+                  {{`{{- if .thresholds }}`}}
+                  thresholds:
+                    {{`{{- range .thresholds }}`}}
+                    - thresholdKind: {{`"{{ .thresholdKind }}"`}}
+                      thresholdType: {{`"{{ .thresholdType }}"`}}
+                      value: {{`"{{ .value }}"`}}
+                    {{`{{- end }}`}}
+                  {{`{{- end }}`}}
+                {{`{{- end }}`}}
+            {{`{{- end }}`}}
+          {{`{{- else }}`}}
+          binaryClassification:
+            {{`{{- range .Values.monitor.metrics.binaryClassification }}`}}
+            - metricID: {{`"{{ .metricID }}"`}}
+              columnThresholds:
+                {{`{{- range .columnThresholds}}`}}
+                - columnNames: 
+                    {{`{{- toYaml .columnNames | nindent 16 }}`}}
+                  {{`{{- if .thresholds }}`}}
+                  thresholds:
+                    {{`{{- range .thresholds }}`}}
+                    - thresholdKind: {{`"{{ .thresholdKind }}"`}}
+                      thresholdType: {{`"{{ .thresholdType }}"`}}
+                      value: {{`"{{ .value }}"`}}
+                    {{`{{- end }}`}}
+                  {{`{{- end }}`}}
+                {{`{{- end }}`}}
+            {{`{{- end }}`}}
+          {{`{{- end }}`}}
+        {{`{{- else }}`}}
+          {{`{{- fail "Enter at least one .Values.monitor.metrics.regression or .Values.monitor.metrics.binaryClassification" }}`}}
+        {{`{{- end }}`}}
+        driftMonitorOperatorSSA:
+          concurrencyPolicy: {{`"{{ .Values.driftMonitorOperatorSSA.concurrencyPolicy }}"`}}
+          successfulRunHistoryLimit: {{`{{ .Values.driftMonitorOperatorSSA.successfulRunHistoryLimit }}`}}
+          failedRunHistoryLimit: {{`{{ .Values.driftMonitorOperatorSSA.failedRunHistoryLimit }}`}}
+          cronExpression: {{`"{{ .Values.driftMonitorOperatorSSA.cronExpression }}"`}}
+          sparkApplicationTemplate:
+            imagePullPolicy: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.imagePullPolicy }}"`}}
+            image: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.image.registry }}/{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.image.repository }}:{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.image.tag }}"`}}
+            mainApplicationFile: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.mainApplicationFile }}"`}}
+            type: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.type }}"`}}
+            pythonVersion: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.pythonVersion }}"`}}
+            mode: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.mode }}"`}}
+            sparkVersion: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.sparkVersion }}"`}}
+            {{`{{- if .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy }}`}}
+            restartPolicy: 
+              type: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.type }}"`}}
+              onFailureRetries: {{`{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.onFailureRetries }}`}}
+              onFailureRetryInterval: {{`{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.onFailureRetryInterval }}`}}
+              onSubmissionFailureRetries: {{`{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.onSubmissionFailureRetries }}`}}
+              onSubmissionFailureRetryInterval: {{`{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.onSubmissionFailureRetryInterval }}`}}
+            {{`{{- end }}`}}
+            sparkConf:
+              {{`{{- toYaml .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.sparkConf | nindent 10 }}`}}
+            {{`{{- if .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.deps }}`}}
+            deps:
+              jars:
+                {{`{{- toYaml .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.deps.jars | nindent 14 }}`}}
+            {{`{{- end }}`}}
+            {{`{{- if .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation }}`}}
+              {{`{{- if eq .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.enabled true }}`}}
+            dynamicAllocation:
+              enabled: {{`{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.enabled }}`}}
+              initialExecutors: {{`{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.initialExecutors }}`}}
+              minExecutors: {{`{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.minExecutors }}`}}
+              maxExecutors: {{`{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.maxExecutors }}`}}
+              {{`{{- end }}`}}
+            {{`{{- end }}`}}
+            driver:
+              annotations:
+                {{`{{- toYaml .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.annotations | nindent 12 }}`}}
+                {{`{{- if eq .Values.k8sPlatformType "Deckhouse" }}`}}
+                {{`{{- include "template.istioAnnotations" . | nindent 12 }}`}}
+                {{`{{-  end }}`}}
+              {{`{{- if .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.javaOptions }}`}}
+              javaOptions: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.javaOptions }}"`}}
+              {{`{{- end }}`}}
+              cores: {{`{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.cores }}`}}
+              coreRequest: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.coreRequest | default .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.cores }}"`}}
+              coreLimit: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.coreLimit | default .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.cores }}"`}}
+              memory: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.memory }}"`}}
+              serviceAccount: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.serviceAccount }}"`}}
+              {{`{{- if .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.env }}`}}
+              env:
+                {{`{{- range .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.env }}`}}
+                - name: {{`"{{ .name }}"`}}
+                  value: {{`"{{ .value }}"`}}
+                {{`{{- end}}`}}
+              {{`{{- end }}`}}
+              volumeMounts:
+                - name: {{`{{ .Release.Name }}`}}-shs
+                  mountPath: /data
+            executor:
+              annotations:
+                {{`{{- toYaml .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.annotations | nindent 12 }}`}}
+                {{`{{- if eq .Values.k8sPlatformType "Deckhouse" }}`}}
+                {{`{{- include "template.istioAnnotations" . | nindent 12 }}`}}
+                {{`{{-  end }}`}}
+              {{`{{- if .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.javaOptions }}`}}
+              javaOptions: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.javaOptions }}"`}}
+              {{`{{- end }}`}}
+              instances: {{`{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.instances }}`}}
+              cores: {{`{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.cores }}`}}
+              coreRequest: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.coreRequest | default .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.cores }}"`}}
+              coreLimit: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.coreLimit | default .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.cores }}"`}}
+              memory: {{`"{{ .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.memory }}"`}}
+              {{`{{- if .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.env }}`}}
+              env:
+                {{`{{- range .Values.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.env }}`}}
+                - name: {{`"{{ .name }}"`}}
+                  value: {{`"{{ .value }}"`}}
+                {{`{{- end}}`}}
+              {{`{{- end }}`}}
+              volumeMounts:
+                - name: {{`{{ .Release.Name }}`}}-shs
+                  mountPath: /data
+            volumes:
+              - name: {{`{{ .Release.Name }}`}}-shs
+                persistentVolumeClaim:
+                  claimName: spark-pvc
+
+
+  - path: templates/Dashboard.yaml
+    template: true
+    content: |
+      apiVersion: dashboard.neoflex.ru/v1alpha1
+      kind: Dashboard
+      metadata:
+        name: {{`{{ .Release.Name }}`}}
+        namespace: {{`{{ .Release.Namespace }}`}}
+        labels:
+          {{`{{- include "template.labels" . | nindent 4 }}`}}
+          app: drift-dashboard
+      spec:
+        image: {{`"{{ .Values.dashboard.image.registry }}/{{ .Values.dashboard.image.repository }}:{{ .Values.dashboard.image.tag }}"`}}
+        imagePullPolicy: {{`"{{ .Values.dashboard.imagePullPolicy }}"`}}
+        tenantID: {{`"{{ .Values.monitor.tenantID }}"`}}
+        projectID: {{`"{{ .Values.monitor.projectID }}"`}}
+        monitorUID: {{`"{{ include "template.monitorUID" . }}"`}}
+
+
+  - path: values.yaml
+    template: true
+    content: |
+
+      subjectArea: "{{ .Values.subjectArea }}"
+
+      monitor:
+        monitorType: "{{ .Values.spec.monitor.monitorType }}"
+        monitorDescription: "{{ .Values.spec.monitor.monitorDescription }}" 
+        primaryTableName: "{{ .Values.spec.monitor.primaryTableName }}"
+        referenceType: "{{ .Values.spec.monitor.referenceType }}"
+        {{- if eq .Values.spec.monitor.referenceType "Baseline Table" }}
+        baselineTableName: "{{ .Values.spec.monitor.baselineTableName }}"
+        {{- end }}
+        problemType: "{{ .Values.spec.monitor.problemType }}"
+        timestampColumnName: "{{ .Values.spec.monitor.timestampColumnName }}"
+        predictionColumnName: "{{ .Values.spec.monitor.predictionColumnName }}"
+        trueLabelColumnName: "{{ .Values.spec.monitor.trueLabelColumnName }}"
+        {{- if .Values.spec.monitor.dropColumnNames }}
+        dropColumnNames: 
+          {{- range .Values.spec.monitor.dropColumnNames }}
+          - "{{ . }}"
+          {{- end }}
+        {{- end }}
+        windows:
+          {{- range .Values.spec.monitor.windows }}
+          - value: {{ .value }}
+            timeUnit: "{{ .timeUnit }}"
+          {{- end }}
+        {{- if or .Values.spec.monitor.metrics.regression .Values.spec.monitor.metrics.binaryClassification }}
+        metrics:
+          {{- if .Values.spec.monitor.metrics.regression }}
+          regression:
+            {{- range .Values.spec.monitor.metrics.regression }}
+            - metricID: "{{ .metricID }}"
+              columnThresholds:
+                {{- range .columnThresholds }}
+                - columnNames: 
+                    {{- range .columnNames }}
+                    - "{{ . }}"
+                    {{- end }}
+                  {{- if .thresholds }}
+                  thresholds:
+                    {{- range .thresholds }}
+                    - thresholdKind: "{{ .thresholdKind }}"
+                      thresholdType: "{{ .thresholdType }}"
+                      value: "{{ .value }}"
+                    {{- end }}
+                  {{- end }}
+                {{- end }}
+            {{- end }}
+          {{- else }}
+          binaryClassification:
+            {{- range .Values.spec.monitor.metrics.binaryClassification }}
+            - metricID: "{{ .metricID }}"
+              columnThresholds:
+                {{- range .columnThresholds }}
+                - columnNames: 
+                    {{- range .columnNames }}
+                    - "{{ . }}"
+                    {{- end }}
+                  {{- if .thresholds }}
+                  thresholds:
+                    {{- range .thresholds }}
+                    - thresholdKind: "{{ .thresholdKind }}"
+                      thresholdType: "{{ .thresholdType }}"
+                      value: "{{ .value }}"
+                    {{- end }}
+                  {{- end }}
+                {{- end }}
+            {{- end }}
+          {{- end }}
+        {{- else }}
+          {{- fail "Enter at least one .Values.spec.monitor.metrics.regression or .Values.spec.monitor.metrics.binaryClassification" }}
+        {{- end }}
+
+      envoyFilter:
+        authServer:
+          port: 50051
+          url: dognauts-authz-service.dognauts.svc
+        header:
+          dashboard: dashboards
+          driftMonitor: spark-ui
+
+
+  - path: values-env.yaml
+    outputFilename: values-{{ .Values.environment }}.yaml
+    template: true
+    content: |
+
+      dashboard:
+        imagePullPolicy: "{{ .Values.spec.dashboard.imagePullPolicy }}"
+        image:
+          registry: "{{ .Values.spec.dashboard.image.registry }}"
+          repository: "{{ .Values.spec.dashboard.image.repository }}"
+          tag: "{{ .Values.spec.dashboard.image.tag }}"
+
+      sparkHistoryServer:
+        URL: "{{ .Values.spec.sparkHistoryServer.URL }}"
+        path: "{{ .Values.spec.sparkHistoryServer.path }}"
+
+      monitor:
+        tenantID: "{{ .Values.spec.monitor.tenantID }}"
+        projectID: "{{ .Values.spec.monitor.projectID }}"
+        dataSourceName: "{{ .Values.spec.monitor.dataSourceName }}"
+
+      driftMonitorOperatorSSA:
+        concurrencyPolicy: "{{ .Values.spec.driftMonitorOperatorSSA.concurrencyPolicy }}"
+        successfulRunHistoryLimit: {{ .Values.spec.driftMonitorOperatorSSA.successfulRunHistoryLimit }}
+        failedRunHistoryLimit: {{ .Values.spec.driftMonitorOperatorSSA.failedRunHistoryLimit }}
+        cronExpression: "{{ .Values.spec.driftMonitorOperatorSSA.cronExpression }}"
+        sparkApplicationTemplate:
+          annotations:
+            vault.security.banzaicloud.io/vault-addr: "https://vault.vault-infra:8200"
+            vault.security.banzaicloud.io/vault-role: "default"
+            vault.security.banzaicloud.io/vault-env-from-path: "secret/data/secret/dognauts/tenants/{{ .Values.spec.monitor.tenantID }}/projects/{{ .Values.spec.monitor.projectID | lower}}"
+            vault.security.banzaicloud.io/vault-skip-verify: "true"
+            vault.security.banzaicloud.io/registry-skip-verify: "true"
+          sparkVersion: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.sparkVersion }}"
+          mainApplicationFile: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.mainApplicationFile }}"
+          type: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.type }}"
+          pythonVersion: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.pythonVersion }}"
+          mode: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.mode }}"
+          imagePullPolicy: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.imagePullPolicy }}"
+          image: 
+            registry: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.image.registry }}"
+            repository: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.image.repository }}"
+            tag: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.image.tag }}"
+          {{- if eq .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.enabled true }}
+          dynamicAllocation:
+            enabled: {{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.enabled }}
+            initialExecutors: {{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.initialExecutors }}
+            minExecutors: {{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.minExecutors }}
+            maxExecutors: {{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.maxExecutors }}
+          {{- end }}
+          {{- if .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy }}
+          restartPolicy:
+            type: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.type }}"
+            onFailureRetries: {{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.onFailureRetries }}
+            onFailureRetryInterval: {{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.onFailureRetryInterval }}
+            onSubmissionFailureRetries: {{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.onSubmissionFailureRetries }}
+            onSubmissionFailureRetryInterval: {{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.onSubmissionFailureRetryInterval }}
+          {{- end }}
+
+          {{- /* Дефолтные значения БЕЗ eventLog.dir */}}
+          {{- $defaultConf := dict 
+            "spark.jars" "local:///opt/spark/jars/postgresql-42.7.3.jar,local:///opt/spark/jars/mysql-connector-j-9.1.0.jar"
+            "spark.executor.extraClassPath" "local:///opt/spark/jars/postgresql-42.7.3.jar:local:///opt/spark/jars/mysql-connector-j-9.1.0.jar"
+            "spark.driver.extraClassPath" "local:///opt/spark/jars/postgresql-42.7.3.jar:local:///opt/spark/jars/mysql-connector-j-9.1.0.jar"
+            "spark.ui.port" "4045"
+            "spark.eventLog.enabled" "true"
+          -}}
+
+          {{- /* Получаем пользовательские настройки */}}
+          {{- $userConf := dict }}
+          {{- $rawConf := .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.sparkConf | default dict }}
+
+          {{- /* Превращаем иерархию в плоскую структуру */}}
+          {{- $queue := list (dict "prefix" "" "value" $rawConf) }}
+          {{- range $idx := until 25 }}
+            {{- if ge $idx (len $queue) }}{{ break }}{{ end }}
+            {{- $item := index $queue $idx }}
+            {{- if kindIs "map" $item.value }}
+              {{- range $key, $nestedValue := $item.value }}
+                {{- $newPrefix := ternary (printf "%s.%s" $item.prefix $key) $key (ne $item.prefix "") }}
+                {{- $queue = append $queue (dict "prefix" $newPrefix "value" $nestedValue) }}
+              {{- end }}
+            {{- else if and (ne $item.value "") (ne $item.value nil) }}
+              {{- $userConf = set $userConf $item.prefix (toString $item.value) }}
+            {{- end }}
+          {{- end }}
+
+          {{- /* Обработка eventLog - ДО объединения с дефолтами */}}
+          {{- $eventLogEnabled := get $userConf "spark.eventLog.enabled" | default "true" }}
+          {{- if eq $eventLogEnabled "true" }}
+            {{- if not (get $userConf "spark.eventLog.dir") }}
+              {{- $userConf = set $userConf "spark.eventLog.dir" .Values.spec.sparkHistoryServer.path }}
+            {{- end }}
+          {{- else }}
+            {{- $userConf = unset $userConf "spark.eventLog.dir" }}
+          {{- end }}
+
+          {{- /* Объединяем настройки (дефолты БЕЗ eventLog.dir) */}}
+          {{- $resultConf := $defaultConf }}
+          {{- range $key, $value := $userConf }}
+            {{- $resultConf = set $resultConf $key $value }}
+          {{- end }}
+          sparkConf:
+            {{- range $key, $value := $resultConf }}
+            "{{ $key }}": "{{ $value }}"
+            {{- end }}
+          deps:
+            jars:
+              {{- $defJars := list "local:///opt/spark/jars/postgresql-42.7.3.jar" "local:///opt/spark/jars/mysql-connector-j-9.1.0.jar" }}
+              {{- $jars := .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.deps.jars | default $defJars }}
+              {{- range $jars }}
+              - "{{ . }}"
+              {{- end }}
+          driver:
+            serviceAccount: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.serviceAccount }}"
+            {{- if .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.javaOptions }}
+            javaOptions: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.javaOptions }}"
+            {{- end }}
+            cores: {{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.cores }}
+            coreRequest: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.coreRequest | default .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.cores }}"
+            coreLimit: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.coreLimit | default .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.cores }}"
+            memory: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.memory }}"
+            {{- if .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.env }}
+            env:
+              {{- range .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.env }}
+              - name: "{{ .name }}"
+                value: "{{ .value }}"
+              {{- end }}
+            {{- end }}
+          executor:
+            serviceAccount: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.serviceAccount }}"
+            {{- if .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.javaOptions }}
+            javaOptions: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.javaOptions }}"
+            {{- end }}
+            instances: {{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.instances }}
+            cores: {{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.cores }}
+            coreRequest: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.coreRequest | default .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.cores }}"
+            coreLimit: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.coreLimit | default .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.cores }}"
+            memory: "{{ .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.memory }}"
+            {{- if .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.env }}
+            env:
+              {{- range .Values.spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.env }}
+              - name: "{{ .name }}"
+                value: "{{ .value }}"
+              {{- end }}
+            {{- end }}
+
+      clusterDomain: {{ .Values.spec.clusterDomain }}
+      k8sPlatformType: {{ .Values.spec.k8sPlatformType }}
+
+
+valuesSchema:
+  chart.name:
+    type: string
+    description: Name of the destination Chart
+    required: true
+  chart.version:
+    type: string
+    description: Version of the destination Chart
+    required: true
+  chart.description:
+    type: string
+    description: Description of the Helm chart contents.
+    required: true
+  subjectArea:
+    type: string
+    description: A tag to classify a subject area of the target chart.
+    required: true
+    default: drift-monitoring
+  sourceMetafileName:
+    type: string
+    description: Path to the source metadata definition file.
+    required: true
+    default: no_data
+  sourceMetafileRepo:
+    type: string
+    description: Repository URL containing metadata files.
+    required: true
+    default: no_data
+  sourceMetafileBranch:
+    type: string
+    description: Git branch for source metadata repository.
+    required: true
+    default: no_data
+
+
+# monitor
+  spec.monitor.tenantID:
+    type: string
+    description: A unique identifier for the tenant or organization
+    required: true
+  spec.monitor.projectID:
+    type: string
+    description: A unique identifier for the project or workspace.
+    required: true
+  spec.monitor.dataSourceName:
+    type: string
+    description: The name of the data source to analyze.
+    required: true
+  spec.monitor.monitorType:
+    type: string
+    description: The type of drift to monitor, e.g., data or concept.
+    required: true
+    default: "Inference"
+  spec.monitor.monitorDescription:
+    type: string
+    description: A brief description of the monitor's purpose.
+    required: true
+  spec.monitor.primaryTableName:
+    type: string
+    description: The name of the table containing the target data for analysis.
+    required: true
+  spec.monitor.referenceType:
+    type: string
+    description: The method to establish the baseline reference data.
+    required: true
+  spec.monitor.baselineTableName:
+    type: string
+    description: The name of the table serving as the baseline dataset.
+    required: false
+  spec.monitor.problemType:
+    type: string
+    description: The machine learning problem type, e.g. binaryClassification, regression.
+    required: true
+  spec.monitor.timestampColumnName:
+    type: string
+    description: The name of the column containing timestamps.
+    required: true
+  spec.monitor.predictionColumnName:
+    type: string
+    description: The name of the column containing model predictions.
+    required: true
+  spec.monitor.trueLabelColumnName:
+    type: string
+    description: The name of the column containing ground truth labels.
+    required: true
+  spec.monitor.dropColumnNames:
+    type: string
+    description: An array of column names to exclude from analysis.
+    required: false
+  spec.monitor.windows.value:
+    type: integer
+    description: The size or length of the rolling time window.
+    required: true
+  spec.monitor.windows.timeUnit:
+    type: string
+    description: The unit of time for the window, e.g. day, hour, week.
+    required: true
+  spec.monitor.metrics.regression.metricID:
+    type: string
+    description: The specific regression metric to calculate
+    required: true
+  spec.monitor.metrics.regression.columnThresholds.columnNames:
+    type: string
+    description: Columns to calculate the metric for and to apply the thresholds to.
+    required: true
+  spec.monitor.metrics.regression.columnThresholds.thresholds.thresholdKind:
+    type: string
+    description: The kind for the threshold
+    required: true
+  spec.monitor.metrics.regression.columnThresholds.thresholds.thresholdType:
+    type: string
+    description: The threshold type
+    required: true
+  spec.monitor.metrics.regression.columnThresholds.thresholds.value:
+    type: float
+    description: The threshold value to trigger an alert.
+    required: true
+  spec.monitor.metrics.binaryClassification.metricID:
+    type: string
+    description: The specific binaryClassification metric to calculate
+    required: true
+  spec.monitor.metrics.binaryClassification.columnThresholds.columnNames:
+    type: string
+    description: Columns to calculate the metric for and to apply the thresholds to.
+    required: true
+  spec.monitor.metrics.binaryClassification.columnThresholds.thresholds.thresholdKind:
+    type: string
+    description: The kind for the threshold
+    required: true
+  spec.monitor.metrics.binaryClassification.columnThresholds.thresholds.thresholdType:
+    type: string
+    description: The threshold type
+    required: true
+  spec.monitor.metrics.binaryClassification.columnThresholds.thresholds.value:
+    type: float
+    description: The threshold value to trigger an alert.
+    required: true
+
+# dashboard
+  spec.dashboard.image.registry:
+    type: string
+    description: Container image registry address.
+    required: true
+    default: "not-provided"
+  spec.dashboard.image.repository:
+    type: string
+    description: Name of the container image.
+    required: true
+    default: "not-provided"
+  spec.dashboard.image.tag:
+    type: string
+    description: Version tag of the container image.
+    required: true
+    default: "not-provided"
+  spec.dashboard.imagePullPolicy:
+    type: string
+    description: Policy for pulling the container image.
+    required: true
+    default: "not-provided"
+
+# sparkHistoryServer
+  spec.sparkHistoryServer.URL:
+    type: string
+    description: The URL path to access the Spark History Server UI.
+    requred: true
+  spec.sparkHistoryServer.path:
+    type: string
+    description: The path to write logs at.
+    requred: true
+    default: "file:/data"
+
+# driftMonitorSSA
+  spec.driftMonitorOperatorSSA.concurrencyPolicy:
+    type: string
+    description: Policy for handling concurrent job executions. Allow, Forbid or Replace.
+    required: true
+  spec.driftMonitorOperatorSSA.successfulRunHistoryLimit:
+    type: integer
+    description: Number of successful job logs to retain.
+    required: true
+  spec.driftMonitorOperatorSSA.failedRunHistoryLimit:
+    type: integer
+    description: Number of failed job logs to retain.
+    required: true
+  spec.driftMonitorOperatorSSA.cronExpression:
+    type: string
+    description: Schedule for triggering the job execution.
+    required: true
+
+# SparkApplicationTemplate
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.sparkVersion:
+    type: string
+    description: Version of Apache Spark to use.
+    required: true
+    default: "3.5.2"
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.mainApplicationFile:
+    type: string
+    description: Path to the main application JAR or Python file.
+    required: true
+    default: "local:///opt/dognauts/driftmonitor/inference.py"
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.type:
+    type: string
+    description: Language type of the Spark application.
+    required: true
+    default: "Python"
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.pythonVersion:
+    type: string
+    description: Python version for the Spark runtime.
+    required: true
+    default: "3"
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.mode:
+    type: string
+    description: Cluster deployment mode for the application.
+    required: true
+    default: "cluster"
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.imagePullPolicy:
+    type: string
+    description: Policy for pulling the Spark job container image.
+    required: true
+    default: "not-provided"
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.image.registry:
+    type: string
+    description: Registry for the Spark job container image.
+    required: true
+    default: "not-provided"
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.image.repository:
+    type: string
+    description: Repository name of the Spark job container image.
+    required: true
+    default: "not-provided"
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.image.tag:
+    type: string
+    description: Tag version of the Spark job container image.
+    required: true
+    default: "not-provided"
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.enabled:
+    type: boolean
+    description: Enables dynamic allocation for cluster resource management
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.initialExecutors:
+    type: integer
+    description: Initial number of executors to allocate.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.minExecutors:
+    type: integer
+    description: Minimum number of executors to maintain.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.maxExecutors:
+    type: integer
+    description: Maximum number of executors to allocate.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.type:
+    type: string
+    description: The type of restart policy. Never, Always or OnFailure
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.onFailureRetries:
+    type: integer
+    description: Number of retries after runtime failures.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.onFailureRetryInterval:
+    type: integer
+    description: Delay between runtime failure retries.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.onSubmissionFailureRetries:
+    type: integer
+    description: Number of retries after submission failures.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.onSubmissionFailureRetryInterval:
+    type: integer
+    description: Delay between submission failure retries.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.sparkConf.spark.jars:
+    type: string
+    description: Additional JAR files for Spark runtime.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.sparkConf.spark.executor.extraClassPath:
+    type: string
+    description: Extra classpath entries for executors.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.sparkConf.spark.driver.extraClassPath:
+    type: string
+    description: Extra classpath entries for driver.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.sparkConf.spark.ui.port:
+    type: string
+    description: Port for Spark application Web UI.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.sparkConf.spark.eventLog.enabled:
+    type: string
+    description: Enable Spark event logging.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.sparkConf.spark.eventLog.dir:
+    type: string
+    description: Directory for Spark event logs.
+    required: false
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.deps.jars:
+    type: string
+    description: Dependency JARs for the application.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.serviceAccount:
+    type: string
+    description: Service account for Spark driver.
+    required: true
+    default: spark
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.javaOptions:
+    type: string
+    description: JVM options for driver process.
+    required: false
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.cores:
+    type: integer
+    description: Number of CPU cores for driver.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.coreLimit:
+    type: string
+    description: Hard CPU core limit for driver.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.coreRequest:
+    type: string
+    description: Requested CPU cores for driver.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.memory:
+    type: string
+    description: Memory allocation for Spark driver.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.env.name:
+    type: string
+    description: Name of driver environment variable.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.driver.env.value:
+    type: string
+    description: Value of driver environment variable.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.serviceAccount:
+    type: string
+    description: Service account for Spark executors.
+    required: true
+    default: spark
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.javaOptions:
+    type: string
+    description: JVM options for executor processes.
+    required: false
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.instances:
+    type: integer
+    description: Number of executor instances to launch.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.cores:
+    type: integer
+    description: Number of CPU cores per executor.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.coreLimit:
+    type: string
+    description: Hard CPU core limit per executor.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.coreRequest:
+    type: string
+    description: Requested CPU cores per executor.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.memory:
+    type: string
+    description: Memory allocation per executor.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.env.name:
+    type: string
+    description: Name of executor environment variable.
+    required: true
+  spec.driftMonitorOperatorSSA.sparkApplicationTemplate.executor.env.value:
+    type: string
+    description: Value of executor environment variable.
+    required: true
+
+  spec.clusterDomain:
+    type: string
+    description: The base DNS domain for Kubernetes cluster services.
+    required: true
+    default: cluster.local
+  spec.k8sPlatformType:
+    type: string
+    description: The k8s platform type (Deckhouse, General, Generic, Default)
+    required: true
+    default: Default
+
+# # ValuesSchema for DriftMonitor.yaml
+  monitor.monitorUID:
+    type: string
+    description: Unique identifier for the drift monitor.
+    requred: true
+  monitor.tenantID:
+    type: string
+    description: A unique identifier for the tenant or organization
+    required: true
+  monitor.projectID:
+    type: string
+    description: A unique identifier for the project or workspace.
+    required: true
+  monitor.dataSourceName:
+    type: string
+    description: The name of the data source to analyze.
+    required: true
+  monitor.monitorDescription:
+    type: string
+    description: A brief description of the monitor's purpose.
+    required: true
+  monitor.primaryTableName:
+    type: string
+    description: The name of the table containing the target data for analysis.
+    required: true
+  monitor.referenceType:
+    type: string
+    description: The method to establish the baseline reference data.
+    required: true
+  monitor.baselineTableName:
+    type: string
+    description: The name of the table serving as the baseline dataset.
+    required: false
+  monitor.problemType:
+    type: string
+    description: The machine learning problem type, e.g. binaryClassification, regression.
+    required: true
+  monitor.timestampColumnName:
+    type: string
+    description: The name of the column containing timestamps.
+    required: true
+  monitor.predictionColumnName:
+    type: string
+    description: The name of the column containing model predictions.
+    required: true
+  monitor.trueLabelColumnName:
+    type: string
+    description: The name of the column containing ground truth labels.
+    required: true
+  monitor.dropColumnNames:
+    type: string
+    description: An array of column names to exclude from analysis.
+    required: false
+  monitor.windows.value:
+    type: integer
+    description: The size or length of the rolling time window.
+    required: true
+  monitor.windows.timeUnit:
+    type: string
+    description: The unit of time for the window, e.g. day, hour, week.
+    required: true
+  metrics.regression.metricID:
+    type: string
+    description: The specific regression metric to calculate
+    required: true
+  metrics.regression.columnThresholds.columnNames:
+    type: string
+    description: Columns to calculate the metric for and to apply the thresholds to.
+    required: true
+  metrics.regression.columnThresholds.thresholds.thresholdKind:
+    type: string
+    description: The kind for the threshold
+    required: true
+  metrics.regression.columnThresholds.thresholds.thresholdType:
+    type: string
+    description: The threshold type
+    required: true
+  metrics.regression.columnThresholds.thresholds.value:
+    type: float
+    description: The threshold value to trigger an alert.
+    required: true
+  metrics.binaryClassification.metricID:
+    type: string
+    description: The specific binaryClassification metric to calculate
+    required: true
+  metrics.binaryClassification.columnThresholds.columnNames:
+    type: string
+    description: Columns to calculate the metric for and to apply the thresholds to.
+    required: true
+  metrics.binaryClassification.columnThresholds.thresholds.thresholdKind:
+    type: string
+    description: The kind for the threshold
+    required: true
+  metrics.binaryClassification.columnThresholds.thresholds.thresholdType:
+    type: string
+    description: The threshold type
+    required: true
+  metrics.binaryClassification.columnThresholds.thresholds.value:
+    type: float
+    description: The threshold value to trigger an alert.
+    required: true
+  driftMonitorOperatorSSA.concurrencyPolicy:
+    type: string
+    description: Policy for handling concurrent job executions. Allow, Forbid or Replace.
+    required: true
+  driftMonitorOperatorSSA.successfulRunHistoryLimit:
+    type: integer
+    description: Number of successful job logs to retain.
+    required: true
+  driftMonitorOperatorSSA.failedRunHistoryLimit:
+    type: integer
+    description: Number of failed job logs to retain.
+    required: true
+  driftMonitorOperatorSSA.cronExpression:
+    type: string
+    description: Schedule for triggering the job execution.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.annotations:
+    type: string
+    description: List of annotations for injecting to driver and executor
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.imagePullPolicy:
+    type: string
+    description: Policy for pulling the Spark job container image.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.image.registry:
+    type: string
+    description: Registry for the Spark job container image.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.image.repository:
+    type: string
+    description: Repository name of the Spark job container image.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.image.tag:
+    type: string
+    description: Tag version of the Spark job container image.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.sparkVersion:
+    type: string
+    description: Version of Apache Spark to use.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.mainApplicationFile:
+    type: string
+    description: Path to the main application JAR or Python file.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.type:
+    type: string
+    description: Language type of the Spark application.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.pythonVersion:
+    type: string
+    description: Python version for the Spark runtime.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.mode:
+    type: string
+    description: Cluster deployment mode for the application.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.type:
+    type: string
+    description: The type of restart policy. Never, Always or OnFailure
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.onFailureRetries:
+    type: integer
+    description: Number of retries after runtime failures.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.onFailureRetryInterval:
+    type: integer
+    description: Delay between runtime failure retries.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.onSubmissionFailureRetries:
+    type: integer
+    description: Number of retries after submission failures.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.restartPolicy.onSubmissionFailureRetryInterval:
+    type: integer
+    description: Delay between submission failure retries.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.sparkConf.spark.jars:
+    type: string
+    description: Additional JAR files for Spark runtime.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.sparkConf.spark.executor.extraClassPath:
+    type: string
+    description: Extra classpath entries for executors.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.sparkConf.spark.driver.extraClassPath:
+    type: string
+    description: Extra classpath entries for driver.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.sparkConf.spark.ui.port:
+    type: string
+    description: Port for Spark application Web UI.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.sparkConf.spark.eventLog.enabled:
+    type: string
+    description: Enable Spark event logging.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.sparkConf.spark.eventLog.dir:
+    type: string
+    description: Directory for Spark event logs.
+    required: false
+  driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.enabled:
+    type: boolean
+    description: Enables dynamic allocation for cluster resource management
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.initialExecutors:
+    type: integer
+    description: Initial number of executors to allocate.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.minExecutors:
+    type: integer
+    description: Minimum number of executors to maintain.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.dynamicAllocation.maxExecutors:
+    type: integer
+    description: Maximum number of executors to allocate.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.driver.serviceAccount:
+    type: string
+    description: Service account for Spark driver.
+    required: true
+    default: spark
+  driftMonitorOperatorSSA.sparkApplicationTemplate.driver.javaOptions:
+    type: string
+    description: JVM options for driver process.
+    required: false
+  driftMonitorOperatorSSA.sparkApplicationTemplate.driver.cores:
+    type: integer
+    description: Number of CPU cores for driver.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.driver.coreLimit:
+    type: string
+    description: Hard CPU core limit for driver.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.driver.coreRequest:
+    type: string
+    description: Requested CPU cores for driver.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.driver.memory:
+    type: string
+    description: Memory allocation for Spark driver.
+    required: true
+    default: 500m
+  driftMonitorOperatorSSA.sparkApplicationTemplate.driver.env.name:
+    type: string
+    description: Name of driver environment variable.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.driver.env.value:
+    type: string
+    description: Value of driver environment variable.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.executor.serviceAccount:
+    type: string
+    description: Service account for Spark executors.
+    required: true
+    default: spark
+  driftMonitorOperatorSSA.sparkApplicationTemplate.executor.javaOptions:
+    type: string
+    description: JVM options for executor processes.
+    required: false
+  driftMonitorOperatorSSA.sparkApplicationTemplate.executor.instances:
+    type: integer
+    description: Number of executor instances to launch.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.executor.cores:
+    type: integer
+    description: Number of CPU cores per executor.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.executor.coreLimit:
+    type: string
+    description: Hard CPU core limit per executor.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.executor.coreRequest:
+    type: string
+    description: Requested CPU cores per executor.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.executor.memory:
+    type: string
+    description: Memory allocation per executor.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.executor.env.name:
+    type: string
+    description: Name of executor environment variable.
+    required: true
+  driftMonitorOperatorSSA.sparkApplicationTemplate.executor.env.value:
+    type: string
+    description: Value of executor environment variable.
+    required: true
+
+# # ValuesSchema for Dashboard.yaml
+  dashboard.image.registry:
+    type: string
+    description: Container image registry address.
+    required: true
+  dashboard.image.repository:
+    type: string
+    description: Name of the container image.
+    required: true
+  dashboard.image.tag:
+    type: string
+    description: Version tag of the container image.
+    required: true
+  dashboard.imagePullPolicy:
+    type: string
+    description: Policy for pulling the container image.
+    required: true
+
+# # ValuesSchema for envoyFilter.yaml
+  envoyFilter.authServer.port:
+    type: integer
+    description: Port of Authz-service
+    required: true
+  envoyFilter.authServer.url:
+    type: string
+    description: Hostname of Authz-service
+    required: true
+  clusterDomain:
+    type: string
+    description: The base DNS domain for Kubernetes cluster services.
+    required: true
+  envoyFilter.header.dashboard:
+    type: string
+    description: Custom grpc metadata for Authz-service
+    required: true
+  envoyFilter.header.driftMonitor:
+    type: string
+    description: Custom grpc metadata for Authz-service
+    required: true
